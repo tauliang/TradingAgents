@@ -178,6 +178,105 @@ def _fetch_openrouter_models() -> List[Tuple[str, str]]:
         return []
 
 
+_LMSTUDIO_MODEL_CACHE: Dict[str, List[Tuple[str, str]]] = {}
+
+
+def _lmstudio_models_url(base_url: str) -> str:
+    """Return the OpenAI-compatible models endpoint for an LM Studio base URL."""
+    return f"{base_url.rstrip('/')}/models"
+
+
+def _resolve_lmstudio_base_url(base_url: Optional[str]) -> Optional[str]:
+    if base_url:
+        return base_url
+
+    from tradingagents.llm_clients.openai_client import resolve_provider_base_url
+
+    return resolve_provider_base_url("lmstudio")
+
+
+def _fetch_lmstudio_models(base_url: Optional[str]) -> List[Tuple[str, str]]:
+    """Fetch model IDs served by LM Studio's OpenAI-compatible API."""
+    resolved_url = _resolve_lmstudio_base_url(base_url)
+    if not resolved_url:
+        return []
+
+    if resolved_url in _LMSTUDIO_MODEL_CACHE:
+        return _LMSTUDIO_MODEL_CACHE[resolved_url]
+
+    import requests
+
+    models_url = _lmstudio_models_url(resolved_url)
+    try:
+        resp = requests.get(models_url, timeout=5)
+        resp.raise_for_status()
+        payload = resp.json()
+        models = payload.get("data", []) if isinstance(payload, dict) else []
+
+        options: List[Tuple[str, str]] = []
+        seen = set()
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            if not isinstance(model_id, str):
+                continue
+            model_id = model_id.strip()
+            if not model_id or model_id in seen:
+                continue
+            options.append((model_id, model_id))
+            seen.add(model_id)
+    except Exception as e:
+        console.print(
+            f"\n[yellow]Could not fetch LM Studio models from {models_url}: {e}[/yellow]"
+        )
+        options = []
+
+    _LMSTUDIO_MODEL_CACHE[resolved_url] = options
+    return options
+
+
+def _merge_model_options(
+    preferred: List[Tuple[str, str]],
+    fallback: List[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """Merge fetched choices before catalog choices while keeping Custom last."""
+    merged: List[Tuple[str, str]] = []
+    seen = set()
+    custom_options: List[Tuple[str, str]] = []
+
+    for display, value in [*preferred, *fallback]:
+        if value == "custom":
+            custom_options.append((display, value))
+            continue
+        if value in seen:
+            continue
+        merged.append((display, value))
+        seen.add(value)
+
+    if custom_options:
+        merged.append(custom_options[-1])
+
+    return merged
+
+
+def _get_model_options(
+    provider: str,
+    mode: str,
+    base_url: Optional[str] = None,
+) -> List[Tuple[str, str]]:
+    """Return provider model options, including live LM Studio models when possible."""
+    catalog_options = get_model_options(provider, mode)
+    if provider.lower() != "lmstudio":
+        return catalog_options
+
+    lmstudio_options = _fetch_lmstudio_models(base_url)
+    if not lmstudio_options:
+        return catalog_options
+
+    return _merge_model_options(lmstudio_options, catalog_options)
+
+
 def select_openrouter_model() -> str:
     """Select an OpenRouter model from the newest available, or enter a custom ID."""
     models = _fetch_openrouter_models()
@@ -213,7 +312,7 @@ def _prompt_custom_model_id() -> str:
     ).ask().strip()
 
 
-def _select_model(provider: str, mode: str) -> str:
+def _select_model(provider: str, mode: str, base_url: Optional[str] = None) -> str:
     """Select a model for the given provider and mode (quick/deep)."""
     if provider.lower() == "openrouter":
         return select_openrouter_model()
@@ -228,7 +327,7 @@ def _select_model(provider: str, mode: str) -> str:
         f"Select Your [{mode.title()}-Thinking LLM Engine]:",
         choices=[
             questionary.Choice(display, value=value)
-            for display, value in get_model_options(provider, mode)
+            for display, value in _get_model_options(provider, mode, base_url)
         ],
         instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
         style=questionary.Style(
@@ -250,14 +349,15 @@ def _select_model(provider: str, mode: str) -> str:
     return choice
 
 
-def select_shallow_thinking_agent(provider) -> str:
+def select_shallow_thinking_agent(provider, base_url: Optional[str] = None) -> str:
     """Select shallow thinking llm engine using an interactive selection."""
-    return _select_model(provider, "quick")
+    return _select_model(provider, "quick", base_url)
 
 
-def select_deep_thinking_agent(provider) -> str:
+def select_deep_thinking_agent(provider, base_url: Optional[str] = None) -> str:
     """Select deep thinking llm engine using an interactive selection."""
-    return _select_model(provider, "deep")
+    return _select_model(provider, "deep", base_url)
+
 
 def select_llm_provider() -> tuple[str, str | None]:
     """Select the LLM provider and its API endpoint."""

@@ -228,6 +228,112 @@ def test_lmstudio_offers_custom_model_id():
         assert values[-1] == "custom", f"'custom' should be last entry: {values}"
 
 
+# ---- dynamic LM Studio model choices ----------------------------------------
+
+
+def test_fetch_lmstudio_models_reads_openai_compatible_endpoint(
+    monkeypatch, stub_questionary
+):
+    import requests
+    import cli.utils as cli_utils
+    importlib.reload(cli_utils)
+
+    calls = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": [
+                    {"id": "local-alpha"},
+                    {"id": "local-beta"},
+                    {"id": "local-alpha"},
+                    {"id": ""},
+                    {"object": "model"},
+                ]
+            }
+
+    def fake_get(url, timeout):
+        calls.append((url, timeout))
+        return _Response()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    assert cli_utils._fetch_lmstudio_models("http://lmstudio:1234/v1") == [
+        ("local-alpha", "local-alpha"),
+        ("local-beta", "local-beta"),
+    ]
+    assert calls == [("http://lmstudio:1234/v1/models", 5)]
+
+
+def test_lmstudio_model_selector_adds_live_models(
+    monkeypatch, stub_questionary
+):
+    import cli.utils as cli_utils
+    importlib.reload(cli_utils)
+
+    seen_base_urls = []
+
+    def fake_fetch(base_url):
+        seen_base_urls.append(base_url)
+        return [
+            ("local-alpha", "local-alpha"),
+            ("qwen2.5-7b-instruct", "qwen2.5-7b-instruct"),
+        ]
+
+    monkeypatch.setattr(cli_utils, "_fetch_lmstudio_models", fake_fetch)
+    stub_questionary.select.return_value.ask.return_value = "local-alpha"
+
+    selected = cli_utils.select_shallow_thinking_agent(
+        "lmstudio", "http://lmstudio:1234/v1"
+    )
+
+    choices = stub_questionary.select.call_args[1]["choices"]
+    values = [choice.value for choice in choices]
+
+    assert selected == "local-alpha"
+    assert seen_base_urls == ["http://lmstudio:1234/v1"]
+    assert values[:2] == ["local-alpha", "qwen2.5-7b-instruct"]
+    assert values.count("qwen2.5-7b-instruct") == 1
+    assert values[-1] == "custom"
+
+
+@pytest.mark.parametrize(
+    ("mode", "static_duplicate"),
+    [
+        ("quick", "qwen2.5-7b-instruct"),
+        ("deep", "mistral-small-22b-instruct-2409"),
+    ],
+)
+def test_lmstudio_merged_model_options_are_unique(
+    monkeypatch, stub_questionary, mode, static_duplicate
+):
+    import cli.utils as cli_utils
+    importlib.reload(cli_utils)
+
+    def fake_fetch(base_url):
+        return [
+            ("local-alpha", "local-alpha"),
+            ("local-alpha", "local-alpha"),
+            (static_duplicate, static_duplicate),
+            ("Custom model ID", "custom"),
+        ]
+
+    monkeypatch.setattr(cli_utils, "_fetch_lmstudio_models", fake_fetch)
+
+    options = cli_utils._get_model_options(
+        "lmstudio", mode, "http://lmstudio:1234/v1"
+    )
+    values = [value for _, value in options]
+
+    assert len(values) == len(set(values))
+    assert values.count(static_duplicate) == 1
+    assert values.count("local-alpha") == 1
+    assert values[-1] == "custom"
+
+
 # ---- api_key_env / no auth --------------------------------------------------
 
 
