@@ -32,6 +32,15 @@ from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
 from cli.stats_handler import StatsCallbackHandler
+from cli.batch import (
+    build_batch_config,
+    ensure_batch_api_key,
+    load_tickers_from_csv,
+    parse_analyst_keys,
+    resolve_analysis_date,
+    run_batch_analysis,
+    write_batch_summary,
+)
 
 console = Console()
 
@@ -1265,6 +1274,97 @@ def run_analysis(checkpoint: bool = False):
         display_complete_report(final_state)
 
 
+def run_batch_from_csv(
+    *,
+    csv_path: Path,
+    ticker_column: str,
+    analysis_date: Optional[str],
+    output_dir: Optional[Path],
+    analysts: Optional[str],
+    research_depth: Optional[int],
+    llm_provider: Optional[str],
+    shallow_thinker: Optional[str],
+    deep_thinker: Optional[str],
+    backend_url: Optional[str],
+    output_language: Optional[str],
+    google_thinking_level: Optional[str],
+    openai_reasoning_effort: Optional[str],
+    anthropic_effort: Optional[str],
+    checkpoint: bool,
+    continue_on_error: bool,
+) -> None:
+    try:
+        tickers = load_tickers_from_csv(csv_path, ticker_column=ticker_column)
+        resolved_date = resolve_analysis_date(analysis_date)
+        requested_analysts = parse_analyst_keys(analysts)
+        config = build_batch_config(
+            checkpoint=checkpoint,
+            research_depth=research_depth,
+            llm_provider=llm_provider,
+            shallow_thinker=shallow_thinker,
+            deep_thinker=deep_thinker,
+            backend_url=backend_url,
+            output_language=output_language,
+            google_thinking_level=google_thinking_level,
+            openai_reasoning_effort=openai_reasoning_effort,
+            anthropic_effort=anthropic_effort,
+        )
+        ensure_batch_api_key(config["llm_provider"])
+    except (RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if output_dir is None:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path.cwd() / "reports" / f"batch_{timestamp}"
+
+    console.print(
+        f"[bold cyan]Starting batch analysis[/bold cyan] "
+        f"for {len(tickers)} ticker(s) on {resolved_date}"
+    )
+    console.print(f"[dim]Reports directory: {output_dir.resolve()}[/dim]")
+
+    def on_start(index, total, ticker, asset_type, selected_analysts):
+        console.print(
+            f"[cyan][{index}/{total}][/cyan] Analyzing {ticker} "
+            f"({asset_type.value}; analysts: {', '.join(selected_analysts)})"
+        )
+
+    def on_success(result):
+        console.print(
+            f"[green]✓ {result.ticker} complete[/green] "
+            f"[dim]decision={result.decision}; report={result.report_path}[/dim]"
+        )
+
+    def on_error(result):
+        console.print(f"[red]✗ {result.ticker} failed:[/red] {result.error}")
+
+    results = run_batch_analysis(
+        tickers=tickers,
+        analysis_date=resolved_date,
+        config=config,
+        requested_analysts=requested_analysts,
+        output_dir=output_dir,
+        save_report=save_report_to_disk,
+        continue_on_error=continue_on_error,
+        on_start=on_start,
+        on_success=on_success,
+        on_error=on_error,
+    )
+    summary_path = write_batch_summary(output_dir, results)
+    successes = sum(1 for result in results if result.status == "success")
+    failures = sum(1 for result in results if result.status == "error")
+
+    console.print(
+        f"\n[bold cyan]Batch complete:[/bold cyan] "
+        f"{successes} succeeded, {failures} failed"
+    )
+    console.print(f"[dim]Summary: {summary_path.resolve()}[/dim]")
+
+    if failures:
+        raise typer.Exit(1)
+
+
 @app.command()
 def analyze(
     checkpoint: bool = typer.Option(
@@ -1277,11 +1377,111 @@ def analyze(
         "--clear-checkpoints",
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
+    tickers_csv: Optional[Path] = typer.Option(
+        None,
+        "--tickers-csv",
+        "-f",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Run non-interactive batch analysis for tickers loaded from a CSV file.",
+    ),
+    ticker_column: str = typer.Option(
+        "ticker",
+        "--ticker-column",
+        help="CSV column containing ticker symbols. Defaults to ticker, with symbol and ticker_symbol aliases.",
+    ),
+    analysis_date: Optional[str] = typer.Option(
+        None,
+        "--date",
+        help="Analysis date for every CSV ticker (YYYY-MM-DD). Defaults to today.",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        help="Directory where batch reports and batch_summary.csv are written.",
+    ),
+    analysts: Optional[str] = typer.Option(
+        None,
+        "--analysts",
+        help="Comma-separated analysts to run: market,social,news,fundamentals. Defaults to all applicable analysts.",
+    ),
+    research_depth: Optional[int] = typer.Option(
+        None,
+        "--research-depth",
+        min=1,
+        help="Debate/risk discussion rounds. Defaults to DEFAULT_CONFIG or TRADINGAGENTS_MAX_DEBATE_ROUNDS.",
+    ),
+    llm_provider: Optional[str] = typer.Option(
+        None,
+        "--llm-provider",
+        help="LLM provider for batch mode. Defaults to DEFAULT_CONFIG or TRADINGAGENTS_LLM_PROVIDER.",
+    ),
+    shallow_thinker: Optional[str] = typer.Option(
+        None,
+        "--shallow-thinker",
+        help="Quick-thinking model for batch mode. Defaults to DEFAULT_CONFIG.",
+    ),
+    deep_thinker: Optional[str] = typer.Option(
+        None,
+        "--deep-thinker",
+        help="Deep-thinking model for batch mode. Defaults to DEFAULT_CONFIG.",
+    ),
+    backend_url: Optional[str] = typer.Option(
+        None,
+        "--backend-url",
+        help="Provider backend URL for batch mode.",
+    ),
+    output_language: Optional[str] = typer.Option(
+        None,
+        "--output-language",
+        help="Report language for batch mode. Defaults to DEFAULT_CONFIG.",
+    ),
+    google_thinking_level: Optional[str] = typer.Option(
+        None,
+        "--google-thinking-level",
+        help="Gemini thinking level for batch mode.",
+    ),
+    openai_reasoning_effort: Optional[str] = typer.Option(
+        None,
+        "--openai-reasoning-effort",
+        help="OpenAI reasoning effort for batch mode.",
+    ),
+    anthropic_effort: Optional[str] = typer.Option(
+        None,
+        "--anthropic-effort",
+        help="Anthropic effort level for batch mode.",
+    ),
+    continue_on_error: bool = typer.Option(
+        True,
+        "--continue-on-error/--stop-on-error",
+        help="Continue processing remaining CSV tickers after a ticker fails.",
+    ),
 ):
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
+    if tickers_csv is not None:
+        run_batch_from_csv(
+            csv_path=tickers_csv,
+            ticker_column=ticker_column,
+            analysis_date=analysis_date,
+            output_dir=output_dir,
+            analysts=analysts,
+            research_depth=research_depth,
+            llm_provider=llm_provider,
+            shallow_thinker=shallow_thinker,
+            deep_thinker=deep_thinker,
+            backend_url=backend_url,
+            output_language=output_language,
+            google_thinking_level=google_thinking_level,
+            openai_reasoning_effort=openai_reasoning_effort,
+            anthropic_effort=anthropic_effort,
+            checkpoint=checkpoint,
+            continue_on_error=continue_on_error,
+        )
+        return
     run_analysis(checkpoint=checkpoint)
 
 

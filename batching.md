@@ -171,6 +171,26 @@ python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
 
+Run a non-interactive batch from a CSV file:
+```bash
+tradingagents --tickers-csv tickers.csv --date 2026-01-15
+```
+
+The CSV may include a `ticker`, `symbol`, or `ticker_symbol` header, or it may be a simple one-ticker-per-line file. Batch mode uses `DEFAULT_CONFIG` plus any `TRADINGAGENTS_*` environment overrides, runs all applicable analysts by default, saves each ticker's report automatically, and writes `batch_summary.csv` to the batch output directory.
+
+Useful overrides:
+```bash
+tradingagents \
+  --tickers-csv tickers.csv \
+  --ticker-column symbol \
+  --output-dir reports/batch_run \
+  --analysts market,news,fundamentals \
+  --research-depth 2 \
+  --llm-provider openai \
+  --shallow-thinker gpt-5.4-mini \
+  --deep-thinker gpt-5.4
+```
+
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>
